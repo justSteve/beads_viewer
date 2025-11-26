@@ -2,7 +2,7 @@
 
 **Project Intelligence for Beads.**
 
-`bv` is a slick, polished Terminal User Interface (TUI) for the [Beads](https://github.com/steveyegge/beads) issue tracker. It transforms your flat list of issues into a visual, interactive workspace with advanced graph theory analytics and insights.
+`bv` is a polished, high-performance Terminal User Interface (TUI) for the [Beads](https://github.com/steveyegge/beads) issue tracker. It transforms your flat list of issues into a visual, interactive workspace with advanced graph theory analytics and insights.
 
 ## Features
 
@@ -30,7 +30,7 @@
 
 ### Quick Install
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_viewer/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_viewer/main/install.sh | bash
 ```
 
 ### Build from Source

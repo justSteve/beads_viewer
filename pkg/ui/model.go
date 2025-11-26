@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -52,15 +53,16 @@ type Model struct {
 	analysis      analysis.GraphStats
 	list          list.Model
 	viewport      viewport.Model
-	renderer      *glamour.TermRenderer
-	board         BoardModel
-	insightsPanel InsightsModel
-
-	// Update State
-	updateAvailable bool
-	updateTag       string
-	updateURL       string
-
+		renderer      *glamour.TermRenderer
+				board         BoardModel
+				insightsPanel InsightsModel
+				theme         Theme
+				
+				// Update State
+				updateAvailable bool
+				updateTag       string
+				updateURL       string
+			
 	// State
 	focused     focus
 	isSplitView bool
@@ -143,8 +145,11 @@ func NewModel(issues []model.Issue) Model {
 		}
 	}
 
+	// Theme
+	theme := DefaultTheme(lipgloss.NewRenderer(os.Stdout))
+
 	// Default delegate
-	delegate := IssueDelegate{Tier: TierCompact}
+	delegate := IssueDelegate{Tier: TierCompact, Theme: theme}
 	l := list.New(items, delegate, 0, 0)
 	l.Title = "Beads"
 	l.SetShowHelp(false)
@@ -159,8 +164,8 @@ func NewModel(issues []model.Issue) Model {
 	)
 
 	// Initialize Board
-	board := NewBoardModel(issues)
-
+	board := NewBoardModel(issues, theme)
+	
 	// Initialize Insights
 	ins := graphStats.GenerateInsights(10)
 	insightsPanel := NewInsightsModel(ins)
@@ -173,6 +178,7 @@ func NewModel(issues []model.Issue) Model {
 		renderer:      r,
 		board:         board,
 		insightsPanel: insightsPanel,
+		theme:         theme,
 		currentFilter: "all",
 		focused:       focusList,
 		countOpen:     cOpen,
@@ -346,13 +352,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tier = TierWide
 		} else if listWidth > 60 {
 			tier = TierNormal
-		} else {
-			tier = TierCompact
-		}
-		m.list.SetDelegate(IssueDelegate{Tier: tier})
-
-		if m.isSplitView {
-			m.renderer, _ = glamour.NewTermRenderer(
+				} else {
+					tier = TierCompact
+				}
+				m.list.SetDelegate(IssueDelegate{Tier: tier, Theme: m.theme})
+				
+				if m.isSplitView {			m.renderer, _ = glamour.NewTermRenderer(
 				glamour.WithAutoStyle(),
 				glamour.WithWordWrap(m.viewport.Width),
 			)

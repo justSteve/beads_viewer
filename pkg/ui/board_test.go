@@ -1,11 +1,13 @@
 package ui_test
 
 import (
+	"os"
 	"testing"
 	"time"
 
 	"beads_viewer/pkg/model"
 	"beads_viewer/pkg/ui"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func createTime(hoursAgo int) time.Time {
@@ -18,9 +20,10 @@ func TestBoardModelBlackbox(t *testing.T) {
 	issues := []model.Issue{
 		{ID: "1", Status: model.StatusOpen, Priority: 1, CreatedAt: createTime(0)},
 	}
-
-	b := ui.NewBoardModel(issues)
-
+	
+	theme := ui.DefaultTheme(lipgloss.NewRenderer(os.Stdout))
+	b := ui.NewBoardModel(issues, theme)
+	
 	// Focus Open col (0)
 	sel := b.SelectedIssue()
 	if sel == nil || sel.ID != "1" {
