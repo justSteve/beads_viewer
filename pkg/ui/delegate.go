@@ -47,55 +47,77 @@ func (d IssueDelegate) Render(w io.Writer, m list.Model, index int, listItem lis
 
 	isSelected := index == m.Index()
 
-	// Column definitions - we'll use the FULL width intelligently
-	// Layout: [sel] [type] [prio] [status] [ID] [title...] [labels] [assignee] [age] [comments]
+	// ══════════════════════════════════════════════════════════════════════════
+	// POLISHED ROW LAYOUT - Stripe-level visual hierarchy
+	// Layout: [sel] [type] [prio-badge] [status-badge] [ID] [title...] [meta]
+	// ══════════════════════════════════════════════════════════════════════════
 
 	// Get all the data
 	icon, iconColor := t.GetTypeIcon(string(i.Issue.IssueType))
-	prioIcon := GetPriorityIcon(i.Issue.Priority)
-	statusStr := strings.ToUpper(string(i.Issue.Status))
 	idStr := i.Issue.ID
 	title := i.Issue.Title
 	ageStr := FormatTimeRel(i.Issue.CreatedAt)
 	commentCount := len(i.Issue.Comments)
 
 	// Calculate widths for right-side columns (fixed)
-	// These go on the right: [age 8] [comments 4] [assignee 12] [labels ~20]
 	rightWidth := 0
 	var rightParts []string
 
-	// Always show age
-	rightParts = append(rightParts, fmt.Sprintf("%8s", ageStr))
-	rightWidth += 9
+	// Show Age and Comments only if we have reasonable width
+	if width > 60 {
+		// Age - with subtle styling
+		ageStyle := t.Renderer.NewStyle().Foreground(ColorMuted)
+		rightParts = append(rightParts, ageStyle.Render(fmt.Sprintf("%8s", ageStr)))
+		rightWidth += 9
 
-	// Comments
-	if commentCount > 0 {
-		rightParts = append(rightParts, fmt.Sprintf("💬%-2d", commentCount))
-	} else {
-		rightParts = append(rightParts, "    ")
+		// Comments with icon
+		if commentCount > 0 {
+			commentStyle := t.Renderer.NewStyle().Foreground(ColorInfo)
+			rightParts = append(rightParts, commentStyle.Render(fmt.Sprintf("💬%d", commentCount)))
+			rightWidth += 4 + len(fmt.Sprintf("%d", commentCount))
+		} else {
+			rightParts = append(rightParts, "   ")
+			rightWidth += 3
+		}
 	}
-	rightWidth += 5
 
 	// Assignee (if present and we have room)
 	if width > 100 && i.Issue.Assignee != "" {
 		assignee := truncateRunesHelper(i.Issue.Assignee, 12, "…")
-		rightParts = append(rightParts, fmt.Sprintf("@%-12s", assignee))
+		assigneeStyle := t.Renderer.NewStyle().Foreground(ColorSecondary)
+		rightParts = append(rightParts, assigneeStyle.Render(fmt.Sprintf("@%-12s", assignee)))
 		rightWidth += 14
 	}
 
-	// Labels (if present and we have room)
+	// Labels (if present and we have room) - render as mini tags
 	if width > 140 && len(i.Issue.Labels) > 0 {
-		labelStr := truncateRunesHelper(strings.Join(i.Issue.Labels, ","), 25, "…")
-		rightParts = append(rightParts, fmt.Sprintf("[%-25s]", labelStr))
-		rightWidth += 28
+		labelStr := truncateRunesHelper(strings.Join(i.Issue.Labels, ","), 20, "…")
+		labelStyle := t.Renderer.NewStyle().
+			Foreground(ColorPrimary).
+			Background(ColorBgSubtle).
+			Padding(0, 1)
+		rightParts = append(rightParts, labelStyle.Render(labelStr))
+		rightWidth += lipgloss.Width(labelStyle.Render(labelStr)) + 1
 	}
 
-	// Left side fixed columns
-	// [selector 2] [icon 2] [prio 2] [hint 1-2] [status 12] [id dynamic] [space]
-	leftFixedWidth := 2 + 3 + 3 + 12 + 1
+	// Left side fixed columns with polished badges
+	// [selector 2] [icon 2] [prio-badge 3] [hint 1-2] [status-badge 6] [id dynamic] [space]
+	leftFixedWidth := 2 + 3 // selector + icon
+
+	// Priority badge (polished)
+	prioBadge := RenderPriorityBadge(i.Issue.Priority)
+	prioBadgeWidth := lipgloss.Width(prioBadge)
+	leftFixedWidth += prioBadgeWidth + 1
+
+	// Priority hint indicator
 	if d.ShowPriorityHints {
-		leftFixedWidth += 1 // Extra space for hint indicator
+		leftFixedWidth += 2
 	}
+
+	// Status badge (polished)
+	statusBadge := RenderStatusBadge(string(i.Issue.Status))
+	statusBadgeWidth := lipgloss.Width(statusBadge)
+	leftFixedWidth += statusBadgeWidth + 1
 
 	// ID width - use actual rune length, but cap reasonably
 	idRunes := []rune(idStr)
@@ -113,8 +135,8 @@ func (d IssueDelegate) Render(w io.Writer, m list.Model, index int, listItem lis
 
 	// Title gets everything in between
 	titleWidth := width - leftFixedWidth - rightWidth - 2
-	if titleWidth < 15 {
-		titleWidth = 15
+	if titleWidth < 5 {
+		titleWidth = 5
 	}
 
 	// Truncate title if needed
@@ -126,42 +148,50 @@ func (d IssueDelegate) Render(w io.Writer, m list.Model, index int, listItem lis
 		title = title + strings.Repeat(" ", titleWidth-len(titleRunes))
 	}
 
-	// Build left side
+	// ══════════════════════════════════════════════════════════════════════════
+	// BUILD THE ROW
+	// ══════════════════════════════════════════════════════════════════════════
 	var leftSide strings.Builder
+
+	// Selection indicator with accent color
 	if isSelected {
-		leftSide.WriteString("▸ ")
+		leftSide.WriteString(t.Renderer.NewStyle().Foreground(t.Primary).Bold(true).Render("▸ "))
 	} else {
 		leftSide.WriteString("  ")
 	}
 
-	// Render icon with color
+	// Type icon with color
 	leftSide.WriteString(t.Renderer.NewStyle().Foreground(iconColor).Render(icon))
 	leftSide.WriteString(" ")
 
-	// Priority
-	leftSide.WriteString(prioIcon)
+	// Priority badge (polished)
+	leftSide.WriteString(prioBadge)
+	leftSide.WriteString(" ")
 
-	// Priority hint indicator (⬆️/⬇️)
+	// Priority hint indicator (↑/↓)
 	if d.ShowPriorityHints && d.PriorityHints != nil {
 		if hint, ok := d.PriorityHints[i.Issue.ID]; ok {
 			if hint.Direction == "increase" {
-				leftSide.WriteString(t.Renderer.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Render("⬆"))
+				leftSide.WriteString(t.Renderer.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Bold(true).Render("↑"))
 			} else if hint.Direction == "decrease" {
-				leftSide.WriteString(t.Renderer.NewStyle().Foreground(lipgloss.Color("#4ECDC4")).Render("⬇"))
+				leftSide.WriteString(t.Renderer.NewStyle().Foreground(lipgloss.Color("#4ECDC4")).Bold(true).Render("↓"))
 			}
 		} else {
 			leftSide.WriteString(" ")
 		}
+		leftSide.WriteString(" ")
 	}
+
+	// Status badge (polished)
+	leftSide.WriteString(statusBadge)
 	leftSide.WriteString(" ")
 
-	// Status with color
-	statusColor := t.GetStatusColor(string(i.Issue.Status))
-	leftSide.WriteString(t.Renderer.NewStyle().Width(11).Foreground(statusColor).Bold(true).Render(statusStr))
-	leftSide.WriteString(" ")
-
-	// ID
-	leftSide.WriteString(t.Renderer.NewStyle().Foreground(t.Secondary).Bold(true).Render(idStr))
+	// ID with secondary styling
+	idStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+	if isSelected {
+		idStyle = idStyle.Bold(true)
+	}
+	leftSide.WriteString(idStyle.Render(idStr))
 	leftSide.WriteString(" ")
 
 	// Diff badge (time-travel mode)
@@ -170,12 +200,14 @@ func (d IssueDelegate) Render(w io.Writer, m list.Model, index int, listItem lis
 		leftSide.WriteString(" ")
 	}
 
-	// Title
+	// Title with emphasis when selected
+	titleStyle := t.Renderer.NewStyle()
 	if isSelected {
-		leftSide.WriteString(t.Renderer.NewStyle().Foreground(t.Primary).Bold(true).Render(title))
+		titleStyle = titleStyle.Foreground(t.Primary).Bold(true)
 	} else {
-		leftSide.WriteString(title)
+		titleStyle = titleStyle.Foreground(lipgloss.AdaptiveColor{Light: "#333333", Dark: "#E8E8E8"})
 	}
+	leftSide.WriteString(titleStyle.Render(title))
 
 	// Right side
 	rightSide := strings.Join(rightParts, " ")
@@ -183,20 +215,14 @@ func (d IssueDelegate) Render(w io.Writer, m list.Model, index int, listItem lis
 	// Combine: left + padding + right
 	leftLen := lipgloss.Width(leftSide.String())
 	rightLen := lipgloss.Width(rightSide)
-	padding := width - leftLen - rightLen - 1
-	if padding < 1 {
-		padding = 1
+	padding := width - leftLen - rightLen
+	if padding < 0 {
+		padding = 0
 	}
 
 	// Construct the row string
-	row := leftSide.String() + strings.Repeat(" ", padding) + t.Renderer.NewStyle().Foreground(t.Secondary).Render(rightSide)
+	row := leftSide.String() + strings.Repeat(" ", padding) + rightSide
 
-	// Force truncation to width-1 to prevent any terminal wrapping issues
-	// We can't easily truncate ANSI strings by rune count without a helper, 
-	// but MaxWidth does soft wrapping. 
-	// The best approach here is to rely on the calculated widths being correct,
-	// but reduce the input width slightly to be safe.
-	
 	// Apply row background for selection and clamp width
 	rowStyle := t.Renderer.NewStyle().Width(width).MaxWidth(width)
 	if isSelected {

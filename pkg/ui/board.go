@@ -13,9 +13,9 @@ import (
 // BoardModel represents the Kanban board view with adaptive columns
 type BoardModel struct {
 	columns      [4][]model.Issue
-	activeColIdx []int        // Indices of non-empty columns (for navigation)
-	focusedCol   int          // Index into activeColIdx
-	selectedRow  [4]int       // Store selection for each column
+	activeColIdx []int  // Indices of non-empty columns (for navigation)
+	focusedCol   int    // Index into activeColIdx
+	selectedRow  [4]int // Store selection for each column
 	ready        bool
 	width        int
 	height       int
@@ -342,8 +342,8 @@ func (b BoardModel) View(width, height int) string {
 		// Empty column placeholder
 		if issueCount == 0 {
 			emptyStyle := t.Renderer.NewStyle().
-				Width(baseWidth - 4).
-				Height(colHeight - 2).
+				Width(baseWidth-4).
+				Height(colHeight-2).
 				Align(lipgloss.Center, lipgloss.Center).
 				Foreground(t.Secondary).
 				Italic(true)
@@ -385,74 +385,98 @@ func (b BoardModel) View(width, height int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, renderedCols...)
 }
 
-// renderCard creates a visually rich card for an issue
+// renderCard creates a visually rich card for an issue with Stripe-level polish
 func (b BoardModel) renderCard(issue model.Issue, width int, selected bool, colIdx int) string {
 	t := b.theme
 
-	// Card styling
+	// ══════════════════════════════════════════════════════════════════════════
+	// CARD STYLING
+	// ══════════════════════════════════════════════════════════════════════════
 	cardStyle := t.Renderer.NewStyle().
 		Width(width).
 		Padding(0, 1).
 		MarginBottom(1)
 
 	if selected {
+		// Selected: elevated with accent border
 		cardStyle = cardStyle.
 			Background(t.Highlight).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(t.Primary)
 	} else {
+		// Unselected: subtle card with bottom border
 		cardStyle = cardStyle.
-			Border(lipgloss.NormalBorder(), false, false, true, false).
+			Border(lipgloss.RoundedBorder()).
 			BorderForeground(t.Border)
 	}
 
-	// Line 1: Type icon, ID, Priority
+	// ══════════════════════════════════════════════════════════════════════════
+	// LINE 1: Type icon + Priority + ID
+	// ══════════════════════════════════════════════════════════════════════════
 	icon, iconColor := t.GetTypeIcon(string(issue.IssueType))
-	prio := GetPriorityIcon(issue.Priority)
+	prioIcon := GetPriorityIcon(issue.Priority)
+
+	// Truncate ID for narrow cards
+	maxIDLen := width - 8
+	if maxIDLen < 6 {
+		maxIDLen = 6
+	}
+	displayID := truncateRunesHelper(issue.ID, maxIDLen, "…")
 
 	line1 := fmt.Sprintf("%s %s %s",
 		t.Renderer.NewStyle().Foreground(iconColor).Render(icon),
-		t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary).Render(issue.ID),
-		prio,
+		prioIcon,
+		t.Renderer.NewStyle().Bold(true).Foreground(t.Secondary).Render(displayID),
 	)
 
-	// Line 2: Title (truncated)
+	// ══════════════════════════════════════════════════════════════════════════
+	// LINE 2: Title with selection highlighting
+	// ══════════════════════════════════════════════════════════════════════════
 	titleWidth := width - 2
 	if titleWidth < 10 {
 		titleWidth = 10
 	}
 	truncatedTitle := truncateRunesHelper(issue.Title, titleWidth, "…")
-	line2 := t.Renderer.NewStyle().
-		Foreground(t.Base.GetForeground()).
-		Bold(selected).
-		Render(truncatedTitle)
 
-	// Line 3: Metadata row (assignee, deps, labels)
+	titleStyle := t.Renderer.NewStyle()
+	if selected {
+		titleStyle = titleStyle.Foreground(t.Primary).Bold(true)
+	} else {
+		titleStyle = titleStyle.Foreground(t.Base.GetForeground())
+	}
+	line2 := titleStyle.Render(truncatedTitle)
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// LINE 3: Metadata chips (assignee, deps, labels, age)
+	// ══════════════════════════════════════════════════════════════════════════
 	var meta []string
 
+	// Assignee chip
 	if issue.Assignee != "" {
-		assignee := truncateRunesHelper(issue.Assignee, 10, "…")
+		assignee := truncateRunesHelper(issue.Assignee, 8, "…")
 		meta = append(meta, t.Renderer.NewStyle().
 			Foreground(t.Secondary).
-			Render("👤"+assignee))
+			Render("@"+assignee))
 	}
 
+	// Dependencies chip with count
 	depCount := len(issue.Dependencies)
 	if depCount > 0 {
-		meta = append(meta, t.Renderer.NewStyle().
-			Foreground(t.Feature). // Orange for dependencies
-			Render(fmt.Sprintf("🔗%d", depCount)))
+		depStyle := t.Renderer.NewStyle().Foreground(t.Feature)
+		meta = append(meta, depStyle.Render(fmt.Sprintf("→%d", depCount)))
 	}
 
+	// Labels chip (first label + count)
 	if len(issue.Labels) > 0 {
-		labelPreview := truncateRunesHelper(issue.Labels[0], 8, "")
-		extra := ""
+		labelPreview := truncateRunesHelper(issue.Labels[0], 6, "")
+		labelText := labelPreview
 		if len(issue.Labels) > 1 {
-			extra = fmt.Sprintf("+%d", len(issue.Labels)-1)
+			labelText += fmt.Sprintf("+%d", len(issue.Labels)-1)
 		}
-		meta = append(meta, t.Renderer.NewStyle().
-			Foreground(t.InProgress). // Cyan for labels
-			Render("🏷️"+labelPreview+extra))
+		labelStyle := t.Renderer.NewStyle().
+			Foreground(t.InProgress).
+			Padding(0, 0)
+		meta = append(meta, labelStyle.Render(labelText))
 	}
 
 	line3 := ""
@@ -462,7 +486,7 @@ func (b BoardModel) renderCard(issue model.Issue, width int, selected bool, colI
 		// Show age if no other metadata
 		age := FormatTimeRel(issue.UpdatedAt)
 		line3 = t.Renderer.NewStyle().
-			Foreground(t.Secondary).
+			Foreground(ColorMuted).
 			Italic(true).
 			Render(age)
 	}

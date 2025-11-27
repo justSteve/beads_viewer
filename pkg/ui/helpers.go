@@ -208,3 +208,21 @@ func GetStatusIcon(s string) string {
 		return "⚪"
 	}
 }
+
+// GetPriorityIcon returns the emoji for a priority level
+func GetPriorityIcon(priority int) string {
+	switch priority {
+	case 0:
+		return "🔥" // Critical
+	case 1:
+		return "⚡" // High
+	case 2:
+		return "🔹" // Medium
+	case 3:
+		return "☕" // Low
+	case 4:
+		return "💤" // Backlog
+	default:
+		return "  "
+	}
+}

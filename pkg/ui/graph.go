@@ -406,12 +406,22 @@ func (g *GraphModel) renderBlockersVisual(blockerIDs []string, width int, t Them
 	if len(blockerIDs) < maxBoxes {
 		maxBoxes = len(blockerIDs)
 	}
+	if maxBoxes < 1 {
+		maxBoxes = 1
+	}
 	boxWidth := (width - 4) / maxBoxes
 	if boxWidth > 20 {
 		boxWidth = 20
 	}
 	if boxWidth < 12 {
 		boxWidth = 12
+	}
+	// Ensure boxWidth doesn't exceed available space (narrow terminals)
+	if boxWidth > width-2 {
+		boxWidth = width - 2
+	}
+	if boxWidth < 8 {
+		boxWidth = 8
 	}
 
 	var boxes []string
@@ -439,12 +449,22 @@ func (g *GraphModel) renderDependentsVisual(dependentIDs []string, width int, t 
 	if len(dependentIDs) < maxBoxes {
 		maxBoxes = len(dependentIDs)
 	}
+	if maxBoxes < 1 {
+		maxBoxes = 1
+	}
 	boxWidth := (width - 4) / maxBoxes
 	if boxWidth > 20 {
 		boxWidth = 20
 	}
 	if boxWidth < 12 {
 		boxWidth = 12
+	}
+	// Ensure boxWidth doesn't exceed available space (narrow terminals)
+	if boxWidth > width-2 {
+		boxWidth = width - 2
+	}
+	if boxWidth < 8 {
+		boxWidth = 8
 	}
 
 	var boxes []string
@@ -615,44 +635,35 @@ func (g *GraphModel) renderConnectorDown(count int, width int, t Theme) string {
 	return connStyle.Render(strings.Join(lines, "\n"))
 }
 
-// renderMetricsPanel renders ALL graph metrics with values and ranks
+// renderMetricsPanel renders ALL graph metrics with polished visualization
 func (g *GraphModel) renderMetricsPanel(id string, width int, t Theme) string {
 	total := len(g.sortedIDs)
 
-	headerStyle := t.Renderer.NewStyle().
-		Bold(true).
-		Foreground(t.Primary).
-		Width(width)
+	// ══════════════════════════════════════════════════════════════════════════
+	// POLISHED METRICS PANEL - Stripe-level visual design
+	// ══════════════════════════════════════════════════════════════════════════
 
-	header := headerStyle.Render("╔══════════════════════════════════════════════════════════════════════════╗")
-	title := headerStyle.Render("║                        📊 COMPREHENSIVE GRAPH METRICS                    ║")
-	sep := headerStyle.Render("╠══════════════════════════════════════════════════════════════════════════╣")
-	footer := headerStyle.Render("╚══════════════════════════════════════════════════════════════════════════╝")
+	// Panel header with accent background
+	panelHeaderStyle := t.Renderer.NewStyle().
+		Bold(true).
+		Foreground(ColorText).
+		Background(ColorPrimary).
+		Padding(0, 2).
+		Width(width - 4)
+
+	panelTitle := panelHeaderStyle.Render("📊 GRAPH METRICS")
 
 	if g.insights == nil || g.insights.Stats == nil {
-		noData := t.Renderer.NewStyle().
-			Foreground(t.Secondary).
+		noDataStyle := t.Renderer.NewStyle().
+			Foreground(ColorMuted).
 			Italic(true).
-			Width(width).
-			Align(lipgloss.Center).
-			Render("No graph analysis data available")
-		return header + "\n" + title + "\n" + sep + "\n" + noData + "\n" + footer
+			Padding(1, 2).
+			Width(width - 4).
+			Align(lipgloss.Center)
+		return panelTitle + "\n" + noDataStyle.Render("No graph analysis data available")
 	}
 
 	stats := g.insights.Stats
-
-	// Helper to format a metric with value and rank
-	formatMetric := func(name string, value float64, rank int, isInt bool) string {
-		var valStr string
-		if isInt {
-			valStr = fmt.Sprintf("%d", int(value))
-		} else if value >= 1.0 {
-			valStr = fmt.Sprintf("%.2f", value)
-		} else {
-			valStr = fmt.Sprintf("%.4f", value)
-		}
-		return fmt.Sprintf("%-16s %8s  #%-3d/%-3d", name, valStr, rank, total)
-	}
 
 	// Get all values and ranks
 	pageRank := stats.PageRank[id]
@@ -673,7 +684,7 @@ func (g *GraphModel) renderMetricsPanel(id string, width int, t Theme) string {
 	rankIn := g.rankInDegree[id]
 	rankOut := g.rankOutDegree[id]
 
-	// If rank is 0, it means no data - set to total
+	// Default ranks to total if 0
 	if rankPR == 0 {
 		rankPR = total
 	}
@@ -699,48 +710,103 @@ func (g *GraphModel) renderMetricsPanel(id string, width int, t Theme) string {
 		rankOut = total
 	}
 
-	metricStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+	// Helper to render a metric row with mini-bar visualization
+	renderMetricRow := func(name string, value float64, rank int, maxVal float64, isInt bool) string {
+		// Name with fixed width
+		nameStyle := t.Renderer.NewStyle().Foreground(ColorSecondary).Width(14)
 
-	// Two-column layout
-	col1 := []string{
-		formatMetric("Critical Path", critPath, rankCP, false),
-		formatMetric("PageRank", pageRank, rankPR, false),
-		formatMetric("Betweenness", betweenness, rankBW, false),
-		formatMetric("Eigenvector", eigenvector, rankEV, false),
+		// Value formatting
+		var valStr string
+		if isInt {
+			valStr = fmt.Sprintf("%d", int(value))
+		} else if value >= 1.0 {
+			valStr = fmt.Sprintf("%.2f", value)
+		} else {
+			valStr = fmt.Sprintf("%.4f", value)
+		}
+		valueStyle := t.Renderer.NewStyle().Foreground(ColorText).Bold(true).Width(8).Align(lipgloss.Right)
+
+		// Mini-bar for relative importance (normalize to 0-1)
+		normalized := 0.0
+		if maxVal > 0 {
+			normalized = value / maxVal
+		}
+		bar := RenderMiniBar(normalized, 6)
+
+		// Rank badge
+		rankBadge := RenderRankBadge(rank, total)
+
+		return nameStyle.Render(name) + " " + valueStyle.Render(valStr) + " " + bar + " " + rankBadge
 	}
 
-	col2 := []string{
-		formatMetric("In-Degree", inDeg, rankIn, true),
-		formatMetric("Out-Degree", outDeg, rankOut, true),
-		formatMetric("Hub Score", hubs, rankHub, false),
-		formatMetric("Authority", authorities, rankAuth, false),
+	// Find max values for normalization
+	maxCP, maxPR, maxBW, maxEV := 0.0, 0.0, 0.0, 0.0
+	maxHub, maxAuth, maxIn, maxOut := 0.0, 0.0, 0.0, 0.0
+	for _, issueID := range g.sortedIDs {
+		if v := stats.CriticalPathScore[issueID]; v > maxCP {
+			maxCP = v
+		}
+		if v := stats.PageRank[issueID]; v > maxPR {
+			maxPR = v
+		}
+		if v := stats.Betweenness[issueID]; v > maxBW {
+			maxBW = v
+		}
+		if v := stats.Eigenvector[issueID]; v > maxEV {
+			maxEV = v
+		}
+		if v := stats.Hubs[issueID]; v > maxHub {
+			maxHub = v
+		}
+		if v := stats.Authorities[issueID]; v > maxAuth {
+			maxAuth = v
+		}
+		if v := float64(stats.InDegree[issueID]); v > maxIn {
+			maxIn = v
+		}
+		if v := float64(stats.OutDegree[issueID]); v > maxOut {
+			maxOut = v
+		}
 	}
 
 	var rows []string
-	rows = append(rows, header)
-	rows = append(rows, title)
-	rows = append(rows, sep)
+	rows = append(rows, panelTitle)
+	rows = append(rows, RenderDivider(width-4))
 
-	for i := 0; i < 4; i++ {
-		left := metricStyle.Render("║ " + col1[i])
-		right := metricStyle.Render(col2[i] + " ║")
-		row := left + "  │  " + right
-		rows = append(rows, row)
-	}
+	// Section: Importance Metrics
+	sectionStyle := t.Renderer.NewStyle().
+		Foreground(ColorPrimary).
+		Bold(true).
+		Padding(0, 1)
+	rows = append(rows, sectionStyle.Render("Importance"))
+	rows = append(rows, "  "+renderMetricRow("Critical Path", critPath, rankCP, maxCP, false))
+	rows = append(rows, "  "+renderMetricRow("PageRank", pageRank, rankPR, maxPR, false))
+	rows = append(rows, "  "+renderMetricRow("Eigenvector", eigenvector, rankEV, maxEV, false))
 
-	rows = append(rows, footer)
+	rows = append(rows, "")
 
-	// Add legend
+	// Section: Flow Metrics
+	rows = append(rows, sectionStyle.Render("Flow & Connectivity"))
+	rows = append(rows, "  "+renderMetricRow("Betweenness", betweenness, rankBW, maxBW, false))
+	rows = append(rows, "  "+renderMetricRow("Hub Score", hubs, rankHub, maxHub, false))
+	rows = append(rows, "  "+renderMetricRow("Authority", authorities, rankAuth, maxAuth, false))
+
+	rows = append(rows, "")
+
+	// Section: Degree
+	rows = append(rows, sectionStyle.Render("Connections"))
+	rows = append(rows, "  "+renderMetricRow("In-Degree", inDeg, rankIn, maxIn, true))
+	rows = append(rows, "  "+renderMetricRow("Out-Degree", outDeg, rankOut, maxOut, true))
+
+	rows = append(rows, "")
+
+	// Legend
 	legendStyle := t.Renderer.NewStyle().
-		Foreground(t.Secondary).
+		Foreground(ColorMuted).
 		Italic(true).
-		Width(width).
-		Align(lipgloss.Center)
+		Width(width - 4)
 
-	legend := legendStyle.Render(
-		"Critical Path=impact depth │ PageRank=importance │ Betweenness=bridge role │ In/Out=connections")
-
-	rows = append(rows, legend)
+	rows = append(rows, legendStyle.Render("█ relative score │ #N rank of "+fmt.Sprintf("%d", total)+" issues"))
 
 	return strings.Join(rows, "\n")
 }
@@ -858,11 +924,4 @@ func smartTruncateID(id string, maxLen int) string {
 		return string(runes[:maxLen-1]) + "…"
 	}
 	return string(runes[:maxLen])
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
