@@ -11,639 +11,504 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// GraphModel represents the dependency graph view
+// GraphModel represents the dependency graph view - ego-centric neighborhood display
 type GraphModel struct {
 	issues       []model.Issue
 	issueMap     map[string]*model.Issue
 	insights     *analysis.Insights
-	selectedNode int
-	scrollX      int
-	scrollY      int
+	selectedIdx  int
+	scrollOffset int
 	width        int
 	height       int
 	theme        Theme
-	nodes        []graphNode
-	edges        []graphEdge
-	layers       [][]int // Node indices per layer
-	canvas       *canvas
-}
 
-// graphNode represents a node in the graph layout
-type graphNode struct {
-	id     string
-	title  string
-	x, y   int // Position in grid coordinates
-	width  int // Width in characters
-	height int // Height in characters
-	layer  int
-	status model.Status
-	itype  model.IssueType
-}
+	// Precomputed graph relationships
+	blockers   map[string][]string // What each issue depends on (blocks this issue)
+	dependents map[string][]string // What depends on each issue (this issue blocks)
 
-// graphEdge represents an edge between nodes
-type graphEdge struct {
-	from, to int  // Node indices
-	depType  string
-}
-
-// canvas is a 2D character buffer for drawing
-type canvas struct {
-	cells  [][]rune
-	colors [][]lipgloss.Style
-	width  int
-	height int
-}
-
-func newCanvas(width, height int) *canvas {
-	cells := make([][]rune, height)
-	colors := make([][]lipgloss.Style, height)
-	for i := range cells {
-		cells[i] = make([]rune, width)
-		colors[i] = make([]lipgloss.Style, width)
-		for j := range cells[i] {
-			cells[i][j] = ' '
-		}
-	}
-	return &canvas{cells: cells, colors: colors, width: width, height: height}
-}
-
-func (c *canvas) set(x, y int, r rune, style lipgloss.Style) {
-	if x >= 0 && x < c.width && y >= 0 && y < c.height {
-		c.cells[y][x] = r
-		c.colors[y][x] = style
-	}
-}
-
-func (c *canvas) get(x, y int) rune {
-	if x >= 0 && x < c.width && y >= 0 && y < c.height {
-		return c.cells[y][x]
-	}
-	return ' '
-}
-
-func (c *canvas) drawString(x, y int, s string, style lipgloss.Style) {
-	for i, r := range []rune(s) {
-		c.set(x+i, y, r, style)
-	}
-}
-
-func (c *canvas) render(theme Theme, scrollX, scrollY, viewWidth, viewHeight int) string {
-	var lines []string
-	for y := scrollY; y < scrollY+viewHeight && y < c.height; y++ {
-		var line strings.Builder
-		for x := scrollX; x < scrollX+viewWidth && x < c.width; x++ {
-			r := c.cells[y][x]
-			style := c.colors[y][x]
-			if style.GetForeground() == (lipgloss.NoColor{}) {
-				line.WriteRune(r)
-			} else {
-				line.WriteString(style.Render(string(r)))
-			}
-		}
-		lines = append(lines, line.String())
-	}
-	return strings.Join(lines, "\n")
+	// Flat list for navigation
+	sortedIDs []string
 }
 
 // NewGraphModel creates a new graph view from issues
 func NewGraphModel(issues []model.Issue, insights *analysis.Insights, theme Theme) GraphModel {
-	issueMap := make(map[string]*model.Issue)
-	for i := range issues {
-		issueMap[issues[i].ID] = &issues[i]
-	}
-
 	g := GraphModel{
 		issues:   issues,
-		issueMap: issueMap,
 		insights: insights,
 		theme:    theme,
 	}
-
-	g.buildGraph()
+	g.rebuildGraph()
 	return g
 }
 
 // SetIssues updates the graph data
 func (g *GraphModel) SetIssues(issues []model.Issue, insights *analysis.Insights) {
 	g.issues = issues
-	g.issueMap = make(map[string]*model.Issue)
-	for i := range issues {
-		g.issueMap[issues[i].ID] = &issues[i]
-	}
 	g.insights = insights
-	g.buildGraph()
+	g.rebuildGraph()
 }
 
-// buildGraph creates the graph layout
-func (g *GraphModel) buildGraph() {
-	// Clear existing graph data
-	g.nodes = nil
-	g.edges = nil
-	g.layers = nil
+func (g *GraphModel) rebuildGraph() {
+	g.issueMap = make(map[string]*model.Issue)
+	g.blockers = make(map[string][]string)
+	g.dependents = make(map[string][]string)
+	g.sortedIDs = nil
 
-	if len(g.issues) == 0 {
-		return
+	for i := range g.issues {
+		issue := &g.issues[i]
+		g.issueMap[issue.ID] = issue
+		g.sortedIDs = append(g.sortedIDs, issue.ID)
 	}
 
-	// Build adjacency list (who depends on whom)
-	dependsOn := make(map[string][]string) // A depends on B
-	allIDs := make(map[string]bool)
-
+	// Build relationships
 	for _, issue := range g.issues {
-		allIDs[issue.ID] = true
 		for _, dep := range issue.Dependencies {
 			if dep.Type == model.DepBlocks || dep.Type == model.DepParentChild {
-				dependsOn[issue.ID] = append(dependsOn[issue.ID], dep.DependsOnID)
+				// issue depends on dep.DependsOnID
+				g.blockers[issue.ID] = append(g.blockers[issue.ID], dep.DependsOnID)
+				// dep.DependsOnID blocks issue
+				g.dependents[dep.DependsOnID] = append(g.dependents[dep.DependsOnID], issue.ID)
 			}
 		}
 	}
 
-	// Compute layers using longest path from roots
-	layers := make(map[string]int)
-	var computeLayer func(id string, visited map[string]bool) int
-	computeLayer = func(id string, visited map[string]bool) int {
-		if layer, ok := layers[id]; ok {
-			return layer
-		}
-		if visited[id] {
-			return 0 // Cycle detected
-		}
-		visited[id] = true
-		maxParent := -1
-		for _, parent := range dependsOn[id] {
-			if _, exists := g.issueMap[parent]; exists {
-				pl := computeLayer(parent, visited)
-				if pl > maxParent {
-					maxParent = pl
-				}
+	// Sort by impact score (from insights) if available, else by ID
+	if g.insights != nil && g.insights.Stats != nil {
+		sort.Slice(g.sortedIDs, func(i, j int) bool {
+			scoreI := g.insights.Stats.CriticalPathScore[g.sortedIDs[i]]
+			scoreJ := g.insights.Stats.CriticalPathScore[g.sortedIDs[j]]
+			if scoreI != scoreJ {
+				return scoreI > scoreJ // Higher impact first
 			}
-		}
-		layers[id] = maxParent + 1
-		return layers[id]
+			return g.sortedIDs[i] < g.sortedIDs[j]
+		})
+	} else {
+		sort.Strings(g.sortedIDs)
 	}
 
-	for id := range allIDs {
-		computeLayer(id, make(map[string]bool))
-	}
-
-	// Group nodes by layer
-	layerGroups := make(map[int][]string)
-	maxLayer := 0
-	for id, layer := range layers {
-		layerGroups[layer] = append(layerGroups[layer], id)
-		if layer > maxLayer {
-			maxLayer = layer
-		}
-	}
-
-	// Sort nodes within layers for consistency
-	for layer := range layerGroups {
-		sort.Strings(layerGroups[layer])
-	}
-
-	// Create nodes with positions
-	g.nodes = nil
-	g.edges = nil
-	g.layers = make([][]int, maxLayer+1)
-
-	nodeWidth := 20
-	nodeHeight := 4 // 4 lines: top border, ID line, title line, bottom border
-	horizontalGap := 4
-	verticalGap := 2
-
-	nodeIndexMap := make(map[string]int)
-
-	for layer := 0; layer <= maxLayer; layer++ {
-		ids := layerGroups[layer]
-		g.layers[layer] = make([]int, len(ids))
-
-		for i, id := range ids {
-			issue := g.issueMap[id]
-			if issue == nil {
-				continue
-			}
-
-			x := i * (nodeWidth + horizontalGap)
-			y := layer * (nodeHeight + verticalGap)
-
-			title := truncateRunesHelper(issue.Title, nodeWidth-4, "…")
-
-			node := graphNode{
-				id:     id,
-				title:  title,
-				x:      x,
-				y:      y,
-				width:  nodeWidth,
-				height: nodeHeight,
-				layer:  layer,
-				status: issue.Status,
-				itype:  issue.IssueType,
-			}
-
-			nodeIdx := len(g.nodes)
-			nodeIndexMap[id] = nodeIdx
-			g.nodes = append(g.nodes, node)
-			g.layers[layer][i] = nodeIdx
-		}
-	}
-
-	// Create edges (from dependency TO dependent, so arrows point downward)
-	for _, issue := range g.issues {
-		dependentIdx, ok := nodeIndexMap[issue.ID]
-		if !ok {
-			continue
-		}
-		for _, dep := range issue.Dependencies {
-			if dep.Type != model.DepBlocks && dep.Type != model.DepParentChild {
-				continue
-			}
-			dependencyIdx, ok := nodeIndexMap[dep.DependsOnID]
-			if !ok {
-				continue
-			}
-			// Edge goes FROM the dependency (above) TO the dependent (below)
-			g.edges = append(g.edges, graphEdge{
-				from:    dependencyIdx,
-				to:      dependentIdx,
-				depType: string(dep.Type),
-			})
-		}
-	}
-
-	// Ensure selected node is valid
-	if g.selectedNode >= len(g.nodes) {
-		g.selectedNode = 0
+	if g.selectedIdx >= len(g.sortedIDs) {
+		g.selectedIdx = 0
 	}
 }
 
-// Navigation methods
+// Navigation
 func (g *GraphModel) MoveUp() {
-	if len(g.nodes) == 0 {
-		return
-	}
-	// Move to previous node in same layer or previous layer
-	current := g.nodes[g.selectedNode]
-	currentLayer := current.layer
-
-	// Try same layer, previous position
-	for i := g.selectedNode - 1; i >= 0; i-- {
-		if g.nodes[i].layer == currentLayer {
-			g.selectedNode = i
-			return
-		}
-	}
-
-	// Try previous layer
-	if currentLayer > 0 {
-		for i := len(g.nodes) - 1; i >= 0; i-- {
-			if g.nodes[i].layer == currentLayer-1 {
-				g.selectedNode = i
-				return
-			}
-		}
+	if g.selectedIdx > 0 {
+		g.selectedIdx--
+		g.ensureVisible()
 	}
 }
 
 func (g *GraphModel) MoveDown() {
-	if len(g.nodes) == 0 {
-		return
-	}
-	current := g.nodes[g.selectedNode]
-	currentLayer := current.layer
-
-	// Try same layer, next position
-	for i := g.selectedNode + 1; i < len(g.nodes); i++ {
-		if g.nodes[i].layer == currentLayer {
-			g.selectedNode = i
-			return
-		}
-	}
-
-	// Try next layer
-	for i := 0; i < len(g.nodes); i++ {
-		if g.nodes[i].layer == currentLayer+1 {
-			g.selectedNode = i
-			return
-		}
+	if g.selectedIdx < len(g.sortedIDs)-1 {
+		g.selectedIdx++
+		g.ensureVisible()
 	}
 }
 
-func (g *GraphModel) MoveLeft() {
-	if g.selectedNode > 0 {
-		g.selectedNode--
-	}
-}
-
-func (g *GraphModel) MoveRight() {
-	if g.selectedNode < len(g.nodes)-1 {
-		g.selectedNode++
-	}
-}
+func (g *GraphModel) MoveLeft()  { g.MoveUp() }
+func (g *GraphModel) MoveRight() { g.MoveDown() }
 
 func (g *GraphModel) PageUp() {
-	g.scrollY -= 10
-	if g.scrollY < 0 {
-		g.scrollY = 0
+	g.selectedIdx -= 10
+	if g.selectedIdx < 0 {
+		g.selectedIdx = 0
 	}
+	g.ensureVisible()
 }
 
 func (g *GraphModel) PageDown() {
-	g.scrollY += 10
-	// Bound check will be applied during render based on canvas size
+	g.selectedIdx += 10
+	if g.selectedIdx >= len(g.sortedIDs) {
+		g.selectedIdx = len(g.sortedIDs) - 1
+	}
+	g.ensureVisible()
 }
 
-func (g *GraphModel) ScrollLeft() {
-	g.scrollX -= 10
-	if g.scrollX < 0 {
-		g.scrollX = 0
-	}
+func (g *GraphModel) ScrollLeft()  {}
+func (g *GraphModel) ScrollRight() {}
+
+func (g *GraphModel) ensureVisible() {
+	// Will be used with scrollOffset if needed
 }
 
-func (g *GraphModel) ScrollRight() {
-	g.scrollX += 10
-	// Bound check will be applied during render based on canvas size
-}
-
-// clampScroll ensures scroll values are within valid bounds
-func (g *GraphModel) clampScroll(canvasWidth, canvasHeight, viewWidth, viewHeight int) {
-	maxScrollX := canvasWidth - viewWidth
-	if maxScrollX < 0 {
-		maxScrollX = 0
-	}
-	if g.scrollX > maxScrollX {
-		g.scrollX = maxScrollX
-	}
-	if g.scrollX < 0 {
-		g.scrollX = 0
-	}
-
-	maxScrollY := canvasHeight - viewHeight
-	if maxScrollY < 0 {
-		maxScrollY = 0
-	}
-	if g.scrollY > maxScrollY {
-		g.scrollY = maxScrollY
-	}
-	if g.scrollY < 0 {
-		g.scrollY = 0
-	}
-}
-
-// SelectedIssue returns the currently selected issue
 func (g *GraphModel) SelectedIssue() *model.Issue {
-	if len(g.nodes) == 0 || g.selectedNode >= len(g.nodes) {
+	if len(g.sortedIDs) == 0 {
 		return nil
 	}
-	id := g.nodes[g.selectedNode].id
+	id := g.sortedIDs[g.selectedIdx]
 	return g.issueMap[id]
 }
 
-// TotalCount returns the number of nodes in the graph
 func (g *GraphModel) TotalCount() int {
-	return len(g.nodes)
+	return len(g.sortedIDs)
 }
 
-// View renders the graph
+// View renders the ego-centric graph view
 func (g *GraphModel) View(width, height int) string {
+	g.width = width
+	g.height = height
 	t := g.theme
 
-	if len(g.nodes) == 0 {
+	if len(g.sortedIDs) == 0 {
 		return t.Renderer.NewStyle().
 			Width(width).
 			Height(height).
 			Align(lipgloss.Center, lipgloss.Center).
 			Foreground(t.Secondary).
-			Render("No dependency graph to display")
+			Render("No issues to display")
 	}
 
-	// Calculate canvas size based on nodes
-	canvasWidth := 0
-	canvasHeight := 0
-	for _, node := range g.nodes {
-		right := node.x + node.width + 2
-		bottom := node.y + node.height + 2
-		if right > canvasWidth {
-			canvasWidth = right
+	selectedID := g.sortedIDs[g.selectedIdx]
+	selectedIssue := g.issueMap[selectedID]
+	if selectedIssue == nil {
+		return "Error: selected issue not found"
+	}
+
+	// Layout: Left panel (node list) | Right panel (neighborhood view)
+	listWidth := 32
+	if width < 100 {
+		listWidth = 24
+	}
+	if width < 80 {
+		// Narrow: just show neighborhood
+		return g.renderNeighborhood(selectedID, selectedIssue, width, height, t)
+	}
+
+	detailWidth := width - listWidth - 3 // 3 for border/separator
+
+	// Left: scrollable list of all nodes
+	listView := g.renderNodeList(listWidth, height-2, t)
+
+	// Right: neighborhood view of selected node
+	neighborView := g.renderNeighborhood(selectedID, selectedIssue, detailWidth, height-2, t)
+
+	// Combine with separator
+	separator := t.Renderer.NewStyle().
+		Foreground(t.Secondary).
+		Render(strings.Repeat("│\n", height-2))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, listView, separator, neighborView)
+}
+
+// renderNodeList renders the left panel with all nodes
+func (g *GraphModel) renderNodeList(width, height int, t Theme) string {
+	var lines []string
+
+	// Header
+	headerStyle := t.Renderer.NewStyle().
+		Bold(true).
+		Foreground(t.Primary).
+		Width(width)
+	lines = append(lines, headerStyle.Render("📊 Nodes ("+fmt.Sprintf("%d", len(g.sortedIDs))+")"))
+	lines = append(lines, strings.Repeat("─", width))
+
+	// Calculate visible range
+	visibleItems := height - 4
+	if visibleItems < 1 {
+		visibleItems = 1
+	}
+
+	startIdx := g.scrollOffset
+	if g.selectedIdx < startIdx {
+		startIdx = g.selectedIdx
+	} else if g.selectedIdx >= startIdx+visibleItems {
+		startIdx = g.selectedIdx - visibleItems + 1
+	}
+	g.scrollOffset = startIdx
+
+	endIdx := startIdx + visibleItems
+	if endIdx > len(g.sortedIDs) {
+		endIdx = len(g.sortedIDs)
+	}
+
+	// Render visible items
+	for i := startIdx; i < endIdx; i++ {
+		id := g.sortedIDs[i]
+		issue := g.issueMap[id]
+		if issue == nil {
+			continue
 		}
-		if bottom > canvasHeight {
-			canvasHeight = bottom
+
+		isSelected := i == g.selectedIdx
+
+		// Status indicator
+		statusIcon := getStatusIcon(issue.Status)
+
+		// Truncate ID to fit
+		maxIDLen := width - 4 // 2 for status, 2 for padding
+		displayID := smartTruncateID(id, maxIDLen)
+
+		line := fmt.Sprintf("%s %s", statusIcon, displayID)
+
+		var style lipgloss.Style
+		if isSelected {
+			style = t.Renderer.NewStyle().
+				Bold(true).
+				Foreground(t.Primary).
+				Background(t.Highlight).
+				Width(width)
+		} else {
+			style = t.Renderer.NewStyle().
+				Foreground(getStatusColor(issue.Status, t)).
+				Width(width)
 		}
+
+		lines = append(lines, style.Render(line))
 	}
 
-	// Minimum canvas size
-	if canvasWidth < width {
-		canvasWidth = width
+	// Scroll indicator
+	if len(g.sortedIDs) > visibleItems {
+		scrollInfo := fmt.Sprintf("(%d-%d of %d)", startIdx+1, endIdx, len(g.sortedIDs))
+		scrollStyle := t.Renderer.NewStyle().
+			Foreground(t.Secondary).
+			Italic(true).
+			Width(width).
+			Align(lipgloss.Center)
+		lines = append(lines, scrollStyle.Render(scrollInfo))
 	}
-	if canvasHeight < height-4 {
-		canvasHeight = height - 4
-	}
 
-	g.canvas = newCanvas(canvasWidth, canvasHeight)
+	return strings.Join(lines, "\n")
+}
 
-	// Clamp scroll values before rendering
-	viewHeight := height - 4
-	g.clampScroll(canvasWidth, canvasHeight, width, viewHeight)
+// renderNeighborhood renders the ego-centric view of selected node
+func (g *GraphModel) renderNeighborhood(id string, issue *model.Issue, width, height int, t Theme) string {
+	var sections []string
 
-	// Draw edges first (behind nodes)
-	g.drawEdges()
-
-	// Draw nodes
-	g.drawNodes()
-
-	// Render header
+	// Header with selected node info
 	headerStyle := t.Renderer.NewStyle().
 		Bold(true).
 		Foreground(t.Primary)
 
-	header := headerStyle.Render(fmt.Sprintf("📊 Dependency Graph (%d nodes, %d edges)", len(g.nodes), len(g.edges)))
+	statusIcon := getStatusIcon(issue.Status)
+	prioIcon := getPriorityIcon(issue.Priority)
+	typeIcon := getTypeIcon(issue.IssueType)
+
+	header := headerStyle.Render(fmt.Sprintf("%s %s %s %s", statusIcon, prioIcon, typeIcon, id))
+	sections = append(sections, header)
+
+	// Title
+	if issue.Title != "" {
+		titleStyle := t.Renderer.NewStyle().
+			Foreground(t.Base.GetForeground()).
+			Width(width - 2)
+		title := truncateRunesHelper(issue.Title, width-4, "…")
+		sections = append(sections, titleStyle.Render("   "+title))
+	}
+
+	sections = append(sections, "")
+
+	// Stats line
+	blockerCount := len(g.blockers[id])
+	dependentCount := len(g.dependents[id])
+
+	statsStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+	stats := fmt.Sprintf("⬆️ Blocked by: %d    ⬇️ Blocks: %d", blockerCount, dependentCount)
+	sections = append(sections, statsStyle.Render(stats))
+	sections = append(sections, "")
+
+	// BLOCKERS section (what this issue depends on)
+	if blockerCount > 0 {
+		sections = append(sections, renderSectionHeader("⬆️ BLOCKED BY (must complete first)", t))
+		for i, blockerID := range g.blockers[id] {
+			if i >= 8 { // Limit to 8 items
+				remaining := blockerCount - 8
+				sections = append(sections, t.Renderer.NewStyle().
+					Foreground(t.Secondary).
+					Italic(true).
+					Render(fmt.Sprintf("   ... and %d more", remaining)))
+				break
+			}
+			sections = append(sections, g.renderRelatedNode(blockerID, width, t, "   "))
+		}
+		sections = append(sections, "")
+	}
+
+	// DEPENDENTS section (what depends on this issue)
+	if dependentCount > 0 {
+		sections = append(sections, renderSectionHeader("⬇️ BLOCKS (waiting on this)", t))
+		for i, depID := range g.dependents[id] {
+			if i >= 8 { // Limit to 8 items
+				remaining := dependentCount - 8
+				sections = append(sections, t.Renderer.NewStyle().
+					Foreground(t.Secondary).
+					Italic(true).
+					Render(fmt.Sprintf("   ... and %d more", remaining)))
+				break
+			}
+			sections = append(sections, g.renderRelatedNode(depID, width, t, "   "))
+		}
+		sections = append(sections, "")
+	}
+
+	// Insights section (if available)
+	if g.insights != nil && g.insights.Stats != nil {
+		sections = append(sections, renderSectionHeader("📈 IMPACT METRICS", t))
+
+		metricsStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
+
+		if score, ok := g.insights.Stats.PageRank[id]; ok && score > 0 {
+			sections = append(sections, metricsStyle.Render(fmt.Sprintf("   PageRank: %.4f", score)))
+		}
+		if score, ok := g.insights.Stats.CriticalPathScore[id]; ok && score > 0 {
+			sections = append(sections, metricsStyle.Render(fmt.Sprintf("   Critical Path: %.2f", score)))
+		}
+		if score, ok := g.insights.Stats.Betweenness[id]; ok && score > 0 {
+			sections = append(sections, metricsStyle.Render(fmt.Sprintf("   Betweenness: %.4f", score)))
+		}
+	}
 
 	// Navigation hint
+	sections = append(sections, "")
 	navStyle := t.Renderer.NewStyle().
 		Foreground(t.Secondary).
 		Italic(true)
-	nav := navStyle.Render("←↓↑→ navigate • PgUp/PgDn scroll • Enter select")
+	sections = append(sections, navStyle.Render("j/k: navigate • enter: view details • g: back to list"))
 
-	// Scroll indicator
-	scrollInfo := ""
-	if g.scrollX > 0 || g.scrollY > 0 {
-		scrollInfo = t.Renderer.NewStyle().
-			Foreground(t.Feature). // Orange for scroll indicator
-			Render(fmt.Sprintf(" [scroll: %d,%d]", g.scrollX, g.scrollY))
-	}
-
-	// Render canvas (viewHeight already computed for clampScroll)
-	canvasView := g.canvas.render(t, g.scrollX, g.scrollY, width, viewHeight)
-
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header+scrollInfo,
-		nav,
-		"",
-		canvasView,
-	)
+	return strings.Join(sections, "\n")
 }
 
-// drawNodes renders all nodes onto the canvas
-func (g *GraphModel) drawNodes() {
-	t := g.theme
-
-	for i, node := range g.nodes {
-		isSelected := i == g.selectedNode
-		g.drawNode(node, isSelected, t)
+func (g *GraphModel) renderRelatedNode(id string, width int, t Theme, prefix string) string {
+	issue := g.issueMap[id]
+	if issue == nil {
+		return t.Renderer.NewStyle().
+			Foreground(t.Secondary).
+			Italic(true).
+			Render(prefix + id + " (not in current filter)")
 	}
+
+	statusIcon := getStatusIcon(issue.Status)
+	statusColor := getStatusColor(issue.Status, t)
+
+	// Format: prefix + status + truncated ID + title snippet
+	maxIDLen := 20
+	displayID := smartTruncateID(id, maxIDLen)
+
+	titleSnippet := ""
+	remainingWidth := width - len(prefix) - 3 - len(displayID) - 3
+	if remainingWidth > 10 && issue.Title != "" {
+		titleSnippet = " " + truncateRunesHelper(issue.Title, remainingWidth, "…")
+	}
+
+	line := fmt.Sprintf("%s%s %s%s", prefix, statusIcon, displayID, titleSnippet)
+
+	return t.Renderer.NewStyle().
+		Foreground(statusColor).
+		Render(line)
 }
 
-// drawNode renders a single node
-func (g *GraphModel) drawNode(node graphNode, selected bool, t Theme) {
-	x, y := node.x, node.y
-	w, h := node.width, node.height
+func renderSectionHeader(title string, t Theme) string {
+	return t.Renderer.NewStyle().
+		Bold(true).
+		Foreground(t.Feature).
+		Render(title)
+}
 
-	// Determine colors based on status
-	var borderColor, textColor lipgloss.AdaptiveColor
-	switch node.status {
+// Helper functions
+
+func getStatusIcon(status model.Status) string {
+	switch status {
 	case model.StatusOpen:
-		borderColor = t.Open
+		return "🔵"
 	case model.StatusInProgress:
-		borderColor = t.InProgress
+		return "🟡"
 	case model.StatusBlocked:
-		borderColor = t.Blocked
+		return "🔴"
 	case model.StatusClosed:
-		borderColor = t.Closed
+		return "✅"
 	default:
-		borderColor = t.Secondary
-	}
-	textColor = borderColor
-
-	borderStyle := t.Renderer.NewStyle().Foreground(borderColor)
-	textStyle := t.Renderer.NewStyle().Foreground(textColor)
-	idStyle := t.Renderer.NewStyle().Foreground(t.Secondary).Bold(true)
-
-	if selected {
-		borderStyle = t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
-		textStyle = t.Renderer.NewStyle().Foreground(t.Primary).Bold(true)
-	}
-
-	// Draw box using Unicode
-	// Top border: ╭─────╮
-	g.canvas.set(x, y, '╭', borderStyle)
-	for i := 1; i < w-1; i++ {
-		g.canvas.set(x+i, y, '─', borderStyle)
-	}
-	g.canvas.set(x+w-1, y, '╮', borderStyle)
-
-	// Middle rows
-	for row := 1; row < h-1; row++ {
-		g.canvas.set(x, y+row, '│', borderStyle)
-		g.canvas.set(x+w-1, y+row, '│', borderStyle)
-	}
-
-	// Bottom border: ╰─────╯
-	g.canvas.set(x, y+h-1, '╰', borderStyle)
-	for i := 1; i < w-1; i++ {
-		g.canvas.set(x+i, y+h-1, '─', borderStyle)
-	}
-	g.canvas.set(x+w-1, y+h-1, '╯', borderStyle)
-
-	// Content: ID on first line, title on second
-	icon, iconColor := t.GetTypeIcon(string(node.itype))
-	iconStyle := t.Renderer.NewStyle().Foreground(iconColor)
-
-	// Line 1: Icon + ID
-	g.canvas.drawString(x+1, y+1, icon, iconStyle)
-	g.canvas.drawString(x+3, y+1, node.id, idStyle)
-
-	// Line 2: Title (if height allows)
-	if h >= 3 {
-		titleTrunc := truncateRunesHelper(node.title, w-2, "…")
-		g.canvas.drawString(x+1, y+2, titleTrunc, textStyle)
+		return "⚪"
 	}
 }
 
-// drawEdges renders all edges onto the canvas
-func (g *GraphModel) drawEdges() {
-	t := g.theme
-	edgeStyle := t.Renderer.NewStyle().Foreground(t.Secondary)
-
-	for _, edge := range g.edges {
-		if edge.from >= len(g.nodes) || edge.to >= len(g.nodes) {
-			continue
-		}
-		fromNode := g.nodes[edge.from]
-		toNode := g.nodes[edge.to]
-
-		// Calculate connection points
-		// From node: bottom center
-		fromX := fromNode.x + fromNode.width/2
-		fromY := fromNode.y + fromNode.height
-
-		// To node: top center
-		toX := toNode.x + toNode.width/2
-		toY := toNode.y - 1
-
-		// Draw the edge
-		g.drawEdge(fromX, fromY, toX, toY, edgeStyle)
+func getStatusColor(status model.Status, t Theme) lipgloss.AdaptiveColor {
+	switch status {
+	case model.StatusOpen:
+		return t.Open
+	case model.StatusInProgress:
+		return t.InProgress
+	case model.StatusBlocked:
+		return t.Blocked
+	case model.StatusClosed:
+		return t.Closed
+	default:
+		return t.Secondary
 	}
 }
 
-// drawEdge draws a line between two points
-func (g *GraphModel) drawEdge(x1, y1, x2, y2 int, style lipgloss.Style) {
-	// Simple orthogonal routing: go down, then horizontal, then down again
-	midY := (y1 + y2) / 2
+func getPriorityIcon(priority int) string {
+	switch priority {
+	case 1:
+		return "🔥"
+	case 2:
+		return "⚡"
+	case 3:
+		return "📌"
+	case 4:
+		return "📋"
+	default:
+		return "  "
+	}
+}
 
-	// Vertical line from start to mid
-	for y := y1; y <= midY; y++ {
-		existing := g.canvas.get(x1, y)
-		char := '│'
-		if existing == '─' {
-			char = '┼'
-		} else if existing == '╰' || existing == '╯' {
-			char = '┴'
-		} else if existing == '╭' || existing == '╮' {
-			char = '┬'
-		}
-		g.canvas.set(x1, y, char, style)
+func getTypeIcon(itype model.IssueType) string {
+	switch itype {
+	case model.TypeBug:
+		return "🐛"
+	case model.TypeFeature:
+		return "✨"
+	case model.TypeTask:
+		return "📝"
+	case model.TypeEpic:
+		return "🎯"
+	case model.TypeChore:
+		return "🔧"
+	default:
+		return "📄"
+	}
+}
+
+// smartTruncateID creates a smart short ID from a long ID
+func smartTruncateID(id string, maxLen int) string {
+	if len(id) <= maxLen {
+		return id
 	}
 
-	// Horizontal line from x1 to x2 at midY
-	if x1 != x2 {
-		minX, maxX := x1, x2
-		if x1 > x2 {
-			minX, maxX = x2, x1
-		}
-		for x := minX; x <= maxX; x++ {
-			existing := g.canvas.get(x, midY)
-			char := '─'
-			if existing == '│' {
-				char = '┼'
+	// Try to create an abbreviated form for underscore-separated IDs
+	parts := strings.Split(id, "_")
+	if len(parts) > 2 {
+		// Take first letter of each part except last, keep more of last part
+		var abbrev strings.Builder
+		for i, part := range parts {
+			if i == len(parts)-1 {
+				// Last part: keep more of it
+				remaining := maxLen - abbrev.Len()
+				if remaining > 0 {
+					if len(part) <= remaining {
+						abbrev.WriteString(part)
+					} else {
+						abbrev.WriteString(part[:remaining-1])
+						abbrev.WriteRune('…')
+					}
+				}
+			} else {
+				// Non-last parts: just first char + underscore
+				if len(part) > 0 {
+					abbrev.WriteRune(rune(part[0]))
+					abbrev.WriteRune('_')
+				}
 			}
-			g.canvas.set(x, midY, char, style)
 		}
-		// Corner at x1, midY
-		if x1 < x2 {
-			g.canvas.set(x1, midY, '└', style)
-			g.canvas.set(x2, midY, '┐', style)
-		} else {
-			g.canvas.set(x1, midY, '┘', style)
-			g.canvas.set(x2, midY, '┌', style)
+		result := abbrev.String()
+		if len(result) <= maxLen {
+			return result
 		}
 	}
 
-	// Vertical line from mid to end
-	// Start at midY+1 if there was a horizontal segment to avoid overwriting corner
-	startY := midY
-	if x1 != x2 {
-		startY = midY + 1
+	// Fall back to simple truncation
+	runes := []rune(id)
+	if len(runes) > maxLen-1 {
+		return string(runes[:maxLen-1]) + "…"
 	}
-	for y := startY; y < y2; y++ {
-		existing := g.canvas.get(x2, y)
-		char := '│'
-		if existing == '─' {
-			char = '┼'
-		}
-		g.canvas.set(x2, y, char, style)
-	}
-
-	// Arrow at the end
-	if y2 > 0 {
-		g.canvas.set(x2, y2, '▼', style)
-	}
+	return id
 }

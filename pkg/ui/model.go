@@ -122,6 +122,10 @@ type Model struct {
 	newIssueIDs      map[string]bool // Issues in diff.NewIssues
 	closedIssueIDs   map[string]bool // Issues in diff.ClosedIssues
 	modifiedIssueIDs map[string]bool // Issues in diff.ModifiedIssues
+
+	// Status message (for temporary feedback)
+	statusMsg     string
+	statusIsError bool
 }
 
 // NewModel creates a new Model from the given issues
@@ -277,6 +281,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateURL = msg.URL
 
 	case tea.KeyMsg:
+		// Clear status message on any keypress
+		m.statusMsg = ""
+		m.statusIsError = false
+
 		// Handle quit confirmation first
 		if m.showQuitConfirm {
 			switch msg.String() {
@@ -1209,6 +1217,31 @@ func (m *Model) renderFooter() string {
 	helpStyle := lipgloss.NewStyle().Foreground(ColorSubtext)
 	countStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Padding(0, 1)
 
+	// If there's a status message, show it prominently
+	if m.statusMsg != "" {
+		var msgStyle lipgloss.Style
+		if m.statusIsError {
+			msgStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#FF6B6B")).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Bold(true).
+				Padding(0, 1)
+		} else {
+			msgStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#4ECDC4")).
+				Foreground(lipgloss.Color("#1a1a2e")).
+				Bold(true).
+				Padding(0, 1)
+		}
+		msgSection := msgStyle.Render(m.statusMsg)
+		remaining := m.width - lipgloss.Width(msgSection)
+		if remaining < 0 {
+			remaining = 0
+		}
+		filler := lipgloss.NewStyle().Background(ColorBgDark).Width(remaining).Render("")
+		return lipgloss.JoinHorizontal(lipgloss.Bottom, msgSection, filler)
+	}
+
 	var filterTxt string
 	switch m.currentFilter {
 	case "all":
@@ -1634,15 +1667,33 @@ func (m Model) FilteredIssues() []model.Issue {
 func (m *Model) enterTimeTravelMode(revision string) {
 	cwd, err := os.Getwd()
 	if err != nil {
+		m.statusMsg = "❌ Time-travel failed: cannot get working directory"
+		m.statusIsError = true
 		return
 	}
 
 	gitLoader := loader.NewGitLoader(cwd)
 
+	// Check if we're in a git repo first
+	if _, err := gitLoader.ResolveRevision("HEAD"); err != nil {
+		m.statusMsg = "❌ Time-travel requires a git repository"
+		m.statusIsError = true
+		return
+	}
+
+	// Check if beads files exist at the revision
+	hasBeads, err := gitLoader.HasBeadsAtRevision(revision)
+	if err != nil || !hasBeads {
+		m.statusMsg = fmt.Sprintf("❌ No beads history at %s (try fewer commits back)", revision)
+		m.statusIsError = true
+		return
+	}
+
 	// Load historical issues
 	historicalIssues, err := gitLoader.LoadAt(revision)
 	if err != nil {
-		// Silently fail - git history may not be available
+		m.statusMsg = fmt.Sprintf("❌ Time-travel failed: %v", err)
+		m.statusIsError = true
 		return
 	}
 
@@ -1671,6 +1722,11 @@ func (m *Model) enterTimeTravelMode(revision string) {
 	m.timeTravelDiff = diff
 	m.timeTravelSince = revision
 
+	// Success feedback
+	m.statusMsg = fmt.Sprintf("⏱️ Time-travel: comparing with %s (+%d ✅%d ~%d)",
+		revision, diff.Summary.IssuesAdded, diff.Summary.IssuesClosed, diff.Summary.IssuesModified)
+	m.statusIsError = false
+
 	// Rebuild list items with diff info
 	m.rebuildListWithDiffInfo()
 }
@@ -1683,6 +1739,10 @@ func (m *Model) exitTimeTravelMode() {
 	m.newIssueIDs = nil
 	m.closedIssueIDs = nil
 	m.modifiedIssueIDs = nil
+
+	// Feedback
+	m.statusMsg = "⏱️ Time-travel mode disabled"
+	m.statusIsError = false
 
 	// Rebuild list without diff info
 	m.rebuildListWithDiffInfo()
